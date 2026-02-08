@@ -38,7 +38,7 @@
     link.href = "data:image/svg+xml;base64," + faviconBase64;
     document.head.appendChild(link);
 
-    // ✅ 만약 PNG base64가 있다면 이렇게 교체 가능:
+    // 만약 PNG base64가 있다면 이렇게 교체 가능:
     // link.type = "image/png";
     // link.href = "data:image/png;base64,....";
   </script>
@@ -429,6 +429,7 @@
             return arr;
           }
 
+          // 날짜 정렬(최근/오래된)
           arr.sort((a, b) => {
             const da = parseDateLoose(a.date, monthNum);
             const db = parseDateLoose(b.date, monthNum);
@@ -453,20 +454,20 @@
                     <div className="mt-2 flex flex-wrap gap-2">
                       {username ? <Badge tone="amber">{username}</Badge> : null}
                       {location ? <Badge tone="violet">{location}</Badge> : null}
-                      {s?.monitor_state && location ? (
+                      {s?.monitor_state && username === "lkim" && location ? (
                         <Badge tone={monitorTone}>
                           ScreenPower: {s.monitor_state === "MONITOR_ON" ? "ON" : "OFF"}
                         </Badge>
-                      ) : (
+                      ) : username=="lkim" ? (
                         <Badge>ScreenPower: -</Badge>
-                      )}
-                      {(s?.is_locked_screen === true || s?.is_locked_screen === false) && location ? (
+			) : <></>}
+                      {username=="lkim"&&(s?.is_locked_screen === true || s?.is_locked_screen === false) && location ? (
                         <Badge tone={lockTone}>
                           ScreenLock: {s?.is_locked_screen ? "ON" : "OFF"}
                         </Badge>
-                      ) : (
+                      ) : username=="lkim" ? (
                         <Badge>ScreenLock: -</Badge>
-                      )}
+			) : <></>}
                       {hasLocation && live.initialized ? <Badge tone="emerald">LIVE</Badge> : <Badge tone="slate">STATIC</Badge>}
                     </div>
                   </div>
@@ -503,8 +504,9 @@
                   </div>
                 </div>
 
-                {/* State + Today */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+		<div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+		{/* State + Today */}
+		{username === "lkim" ? (
                   <Card
                     title="Screen 상태"
                     subtitle="최근 상태 변화 기록"
@@ -523,7 +525,7 @@
                       </div>
                     }
                   >
-                    <div className={[
+		  <div className={[
                       "transition-all duration-300 ease-in-out overflow-hidden",
                       screenDetailOpen ? "max-h-[520px] opacity-100" : "max-h-0 opacity-0"
                     ].join(" ")}>
@@ -542,8 +544,7 @@
                         <KV k="last_screenunlock_time" v={formatTime(s?.last_screenunlock_time)} />
                         <KV k="updated_at" v={formatTime(s?.updated_at)} />
                       </div>
-                    </div>
-
+		    </div>
                     {!screenDetailOpen ? (
                       <div className="flex items-center justify-between">
                         <div className="text-sm text-slate-600">요약</div>
@@ -554,7 +555,7 @@
                         </div>
                       </div>
                     ) : null}
-                  </Card>
+                  </Card> ) : (<></>)}
 
                   <Card title={`${month}월 ${today}일 로그`} subtitle="오늘 누적 시간">
                     <div className="flex items-center justify-between">
@@ -566,6 +567,7 @@
                   </Card>
                 </div>
 
+                {/* Daily list + Sorting */}
                 <Card
                   title={`${month}월 일별 로그`}
                   subtitle="00:00:00은 자동으로 숨김 · 정렬 가능"
