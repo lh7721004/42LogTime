@@ -10,11 +10,12 @@ from fastapi import FastAPI, Query, Body
 from fastapi.requests import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from zoneinfo import ZoneInfo
+
 app = FastAPI()
 users = {}
 api_token: Optional[str] = None
 MAX_HOUR = 80
-
+MAX_DAILY_SECONDS = 12 * 60 * 60  # 12시간 = 43200초
 
 def _get_config() -> Dict[str, str]:
     """
@@ -42,7 +43,6 @@ def _get_config() -> Dict[str, str]:
         "redirect_uri": redirect_uri,
     }
 
-
 def _authorize_url() -> str:
     cfg = _get_config()
     return (
@@ -51,7 +51,6 @@ def _authorize_url() -> str:
         f"&redirect_uri={requests.utils.quote(cfg['redirect_uri'], safe='')}"
         "&response_type=code"
     )
-
 
 def get_api_token() -> str:
     cfg = _get_config()
@@ -176,7 +175,13 @@ def _add_duration_per_day(
     # last partial (same date)
     sec = int((end_local - cursor).total_seconds())
     key = cursor.date().isoformat()
-    per_day_seconds[key] = per_day_seconds.get(key, 0) + max(0, sec)
+    
+    # 일일 최대 학습시간 적용
+    # per_day_seconds[key] = per_day_seconds.get(key, 0) + max(0, sec)
+    current = per_day_seconds.get(key, 0)
+    added = max(0, sec)
+    per_day_seconds[key] = min(current + added,MAX_DAILY_SECONDS)
+
 
 
 def _fetch_locations_in_range(
@@ -374,13 +379,13 @@ def api_time(req: Request):
         locations = _do_fetch()
     except RuntimeError as e:
         err_msg = str(e)
-        # 401 / token expired -> 토큰 갱신 후 1회 재시도
+        # 401 / token expired → 토큰 갱신 후 1회 재시도
         if "401" in err_msg or "expired" in err_msg.lower():
             try:
                 _refresh_api_token()
                 locations = _do_fetch()
             except Exception:
-                # 재시도까지 실패 -> 로그인 만료로 간주하고 다시 로그인 유도
+                # 재시도까지 실패 → 로그인 만료로 간주하고 다시 로그인 유도
                 resp = JSONResponse(
                     status_code=401,
                     content={"authorize_url": _authorize_url()},
@@ -424,7 +429,7 @@ def set_user_state(
     if not me:
         return JSONResponse(status_code=404, content={"error": "user not found"})
 
-    # users에 상태 저장 (덮어쓰기 or 생성)
+    # users에 state 저장 (덮어쓰기 or 생성)
     me["state"] = {
         "monitor_state": payload.get("monitor_state"),
         "last_monitor_off_time": payload.get("last_monitor_off_time"),
