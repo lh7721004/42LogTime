@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>42 Logtime</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Favicon (base64) -->
+  <script>
+    // SVG -> base64 (UTF-8 안전 처리)
+    function svgToBase64(svg) {
+      const encoded = encodeURIComponent(svg)
+        .replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode("0x" + p1));
+      return btoa(encoded);
+    }
+
+    // 기본 SVG favicon (원하면 여기만 바꾸면 됨)
+    const faviconSvg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
+        <defs>
+          <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#38bdf8"/>
+            <stop offset="1" stop-color="#0ea5e9"/>
+          </linearGradient>
+        </defs>
+        <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#g)"/>
+        <text x="50%" y="53%" text-anchor="middle" dominant-baseline="middle"
+              font-family="ui-sans-serif, system-ui, -apple-system" font-size="28" font-weight="800"
+              fill="#ffffff">42</text>
+      </svg>
+    `.trim();
+
+    const faviconBase64 = svgToBase64(faviconSvg);
+    const link = document.createElement("link");
+    link.rel = "icon";
+    link.type = "image/svg+xml";
+    link.href = "data:image/svg+xml;base64," + faviconBase64;
+    document.head.appendChild(link);
+
+    // ✅ 만약 PNG base64가 있다면 이렇게 교체 가능:
+    // link.type = "image/png";
+    // link.href = "data:image/png;base64,....";
+  </script>
+
+  <!-- React (CDN) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- Babel for in-browser JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const KEY_VALUE = {
+      monitor_state: "모니터 상태",
+      last_monitor_off_time: "마지막 모니터 꺼진 시간",
+      last_monitor_on_time: "마지막 모니터 켜진 시간",
+      is_locked_screen: "화면 잠금 여부",
+      last_screenlock_time: "마지막 화면 잠금 시간",
+      last_screenunlock_time: "마지막 화면 잠금 해제 시간",
+      updated_at: "업데이트 시간",
+      MONITOR_ON: "켜짐",
+      MONITOR_OFF: "꺼짐",
+    };
+
+    const { useEffect, useMemo, useRef, useState } = React;
+
+    function extractDay(dateValue) {
+      if (dateValue == null) return NaN;
+      const n = Number(dateValue);
+      if (Number.isFinite(n)) return n;
+      const m = String(dateValue).match(/(\d{1,2})(?!.*\d)/);
+      return m ? Number(m[1]) : NaN;
+    }
+
+    // "HH:MM:SS" -> seconds
+    function hmsToSeconds(hms) {
+      if (!hms || typeof hms !== "string") return 0;
+      const parts = hms.split(":").map((x) => Number(x));
+      if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return 0;
+      const [h, m, s] = parts;
+      return Math.max(0, h * 3600 + m * 60 + s);
+    }
+
+    // seconds -> "HH:MM:SS"
+    function secondsToHms(sec) {
+      const s = Math.max(0, Math.floor(sec || 0));
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const r = s % 60;
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+    }
+
+    // seconds -> "H시간 M분"
+    function secondsToHM(sec) {
+      const s = Math.max(0, Math.floor(sec || 0));
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      if (h <= 0 && m <= 0) return "0분";
+      if (h <= 0) return `${m}분`;
+      if (m <= 0) return `${h}시간`;
+      return `${h}시간 ${m}분`;
+    }
+
+    // epoch seconds / numeric-string / iso-string -> Date or null
+    function toDate(input) {
+      if (input == null || input === "" || input === 0) return null;
+      if (
+        typeof input === "number" ||
+        (typeof input === "string" && input.trim() !== "" && !isNaN(Number(input)))
+      ) {
+        const d = new Date(Number(input) * 1000);
+        return isNaN(d.getTime()) ? null : d;
+      }
+      if (typeof input === "string") {
+        const d = new Date(input);
+        return isNaN(d.getTime()) ? null : d;
+      }
+      return null;
+    }
+
+    function formatTime(input) {
+      const d = toDate(input);
+      if (!d) return "-";
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${pad(d.getMonth() + 1)}월${pad(d.getDate())}일 ${pad(d.getHours())}시${pad(d.getMinutes())}분${pad(d.getSeconds())}초`;
+    }
+
+    function timeAgoFrom(input) {
+      const d = toDate(input);
+      if (!d) return "-";
+      const diffSec = Math.floor((Date.now() - d.getTime()) / 1000);
+      if (diffSec < 0) return "방금(미래 시간)";
+      const days = Math.floor(diffSec / 86400);
+      const hours = Math.floor((diffSec % 86400) / 3600);
+      const mins = Math.floor((diffSec % 3600) / 60);
+      if (days > 0) return `${days}일 ${hours}시간 전`;
+      if (hours > 0) return `${hours}시간 ${mins}분 전`;
+      return `${mins}분 전`;
+    }
+
+    function Badge({ children, tone = "slate" }) {
+      const toneMap = {
+        slate: "bg-slate-100 text-slate-800",
+        sky: "bg-sky-100 text-sky-800",
+        emerald: "bg-emerald-100 text-emerald-800",
+        rose: "bg-rose-100 text-rose-800",
+        amber: "bg-amber-100 text-amber-900",
+        violet: "bg-violet-100 text-violet-800",
+      };
+      return (
+        <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${toneMap[tone] || toneMap.slate}`}>
+          {children}
+        </span>
+      );
+    }
+
+    function Card({ title, subtitle, children, right, is_no_py = false }) {
+      return (
+        <div className="bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-bold text-slate-900">{title}</div>
+              {subtitle ? <div className="text-xs text-slate-500 mt-0.5">{subtitle}</div> : null}
+            </div>
+            {right ? <div>{right}</div> : null}
+          </div>
+          <div className={`${is_no_py ? "px-4" : "p-4"}`}>{children}</div>
+        </div>
+      );
+    }
+
+    function KV({ k, v }) {
+      return (
+        <div className="flex items-center justify-between gap-3 py-2">
+          <div className="text-sm text-slate-600">{KEY_VALUE[k] ?? k}</div>
+          <div className="text-sm font-semibold text-slate-900 text-right break-all">
+            {v === "MONITOR_ON" || v === "MONITOR_OFF" ? KEY_VALUE[v] : v}
+          </div>
+        </div>
+      );
+    }
+
+    function calcPercent(usedSec, maxHour) {
+      const maxSec = Math.max(1, Math.floor((Number(maxHour) || 80) * 3600));
+      const raw = (Math.max(0, usedSec) / maxSec) * 100;
+      return Math.min(100, Math.max(0, raw));
+    }
+
+    function parseDateLoose(s, month) {
+      // days[].date가 "2월 7일" / "2026-02-07" / "07" 등 섞여도 최대한 맞춰줌
+      if (!s) return null;
+      const str = String(s).trim();
+
+      // ISO
+      if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+        const d = new Date(str + "T00:00:00");
+        return isNaN(d.getTime()) ? null : d;
+      }
+
+      // "2월 7일" 형태
+      const m = str.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+      if (m) {
+        const mm = Number(m[1]);
+        const dd = Number(m[2]);
+        const y = new Date().getFullYear();
+        const d = new Date(y, mm - 1, dd, 0, 0, 0);
+        return isNaN(d.getTime()) ? null : d;
+      }
+
+      // 숫자만(일)
+      const day = extractDay(str);
+      if (Number.isFinite(day) && Number.isFinite(Number(month))) {
+        const y = new Date().getFullYear();
+        const d = new Date(y, Number(month) - 1, day, 0, 0, 0);
+        return isNaN(d.getTime()) ? null : d;
+      }
+
+      return null;
+    }
+
+    function App() {
+      const [state, setState] = useState({ status: "loading" });
+      const [screenDetailOpen, setScreenDetailOpen] = useState(false);
+
+      // 정렬 옵션
+      const [sortMode, setSortMode] = useState("recent"); // recent | old | max | min
+
+      // live 초기화 여부 분리
+      const [live, setLive] = useState({
+        initialized: false,
+        alltimeSec: 0,
+        todaySec: 0,
+        dayKey: "",
+        monthKey: "",
+      });
+
+      const reloadingRef = useRef(false);
+
+      async function loadTime() {
+        const res = await fetch("/api/time", { credentials: "include" });
+        if (res.status === 401) {
+          const body = await res.json().catch(() => null);
+          if (body && body.authorize_url) {
+            window.location.href = body.authorize_url;
+            return null;
+          }
+        }
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API error (${res.status}): ${text}`);
+        }
+        return await res.json();
+      }
+
+      // 최초 로드
+      useEffect(() => {
+        let cancelled = false;
+        (async () => {
+          try {
+            const data = await loadTime();
+            if (!data) return;
+            if (!cancelled) setState({ status: "ready", data });
+          } catch (e) {
+            if (!cancelled) setState({ status: "error", error: String(e?.message || e) });
+          }
+        })();
+        return () => { cancelled = true; };
+      }, []);
+
+      // state.data 준비되면 live 베이스 세팅
+      useEffect(() => {
+        if (state.status !== "ready") return;
+
+        const data = state.data || {};
+        const { alltime_hms, days = [] } = data;
+
+        const now = new Date();
+        const dayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+        const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+        const alltimeSecBase = hmsToSeconds(alltime_hms);
+
+        const today = now.getDate();
+        const todayObj = (days || []).find((d) => extractDay(d.date) === today);
+        const todaySecBase = todayObj ? hmsToSeconds(todayObj.hms) : 0;
+
+        setLive({
+          initialized: true,
+          alltimeSec: alltimeSecBase,
+          todaySec: todaySecBase,
+          dayKey,
+          monthKey,
+        });
+      }, [state.status, state.data]);
+
+      // location 있을 때만 1초 증가 + 날짜/월 변경 처리
+      useEffect(() => {
+        if (state.status !== "ready") return;
+
+        const data = state.data || {};
+        const hasLocation = !!data.location;
+        if (!hasLocation) return;
+
+        const id = setInterval(async () => {
+          const now = new Date();
+          const curDayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+          const curMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+          let dayChanged = false;
+          let monthChanged = false;
+
+          setLive((prev) => {
+            if (!prev.initialized) return prev;
+
+            dayChanged = prev.dayKey && curDayKey !== prev.dayKey;
+            monthChanged = prev.monthKey && curMonthKey !== prev.monthKey;
+
+            let nextAll = prev.alltimeSec + 1;
+            let nextToday = prev.todaySec + 1;
+
+            if (dayChanged) nextToday = 0;
+            if (monthChanged) { nextAll = 0; nextToday = 0; }
+
+            return {
+              ...prev,
+              alltimeSec: nextAll,
+              todaySec: nextToday,
+              dayKey: curDayKey,
+              monthKey: curMonthKey,
+            };
+          });
+
+          if ((dayChanged || monthChanged) && !reloadingRef.current) {
+            reloadingRef.current = true;
+            try {
+              const newData = await loadTime();
+              if (newData) setState({ status: "ready", data: newData });
+            } catch (e) {
+              console.log("refetch failed:", e);
+            } finally {
+              reloadingRef.current = false;
+            }
+          }
+        }, 1000);
+
+        return () => clearInterval(id);
+      }, [state.status, state.data]);
+
+      const content = useMemo(() => {
+        if (state.status === "loading") {
+          return (
+            <div className="min-h-screen bg-gradient-to-b from-sky-50 to-slate-100 flex items-center justify-center p-6">
+              <div className="max-w-[520px] w-full bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-5">
+                <div className="text-lg font-extrabold text-slate-900">불러오는 중...</div>
+                <div className="mt-4 h-2 bg-slate-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-sky-500 w-1/3 animate-pulse" />
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        if (state.status === "error") {
+          return (
+            <div className="min-h-screen bg-gradient-to-b from-sky-50 to-slate-100 flex items-center justify-center p-6">
+              <div className="max-w-[860px] w-full bg-white rounded-2xl shadow-sm ring-1 ring-rose-200 p-5">
+                <div className="text-lg font-extrabold text-rose-700">에러</div>
+                <pre className="mt-3 text-xs whitespace-pre-wrap text-rose-900 bg-rose-50 border border-rose-100 rounded-xl p-3">
+                  {state.error}
+                </pre>
+                <a className="inline-block mt-4 text-sm font-semibold text-sky-700 hover:text-sky-900 underline" href="/time">
+                  새로고침
+                </a>
+              </div>
+            </div>
+          );
+        }
+
+        const data = state.data || {};
+        const { month, alltime_hms, percent, days = [], location, state: s, username } = data;
+
+        const hasLocation = !!location;
+
+        const today = new Date().getDate();
+        const todayObj = (days || []).find((d) => extractDay(d.date) === today);
+        const todayHmsStatic = todayObj?.hms || "00:00:00";
+
+        const alltimeHmsShown =
+          hasLocation && live.initialized ? secondsToHms(live.alltimeSec) : alltime_hms;
+
+        const todayHmsShown =
+          hasLocation && live.initialized ? secondsToHms(live.todaySec) : todayHmsStatic;
+
+        const parsedMax = Number(data.max_hour);
+        const maxHour = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 80;
+
+        const usedSec = (hasLocation && live.initialized) ? live.alltimeSec : hmsToSeconds(alltime_hms);
+        const percentShown = hasLocation && live.initialized
+          ? calcPercent(usedSec, maxHour)
+          : (Number.isFinite(Number(percent)) ? Number(percent) : 0);
+
+        const remainSec = Math.max(0, maxHour * 3600 - usedSec);
+        const remainText = secondsToHM(remainSec);
+
+        const monitorTone =
+          s?.monitor_state === "MONITOR_ON" ? "emerald" :
+          s?.monitor_state === "MONITOR_OFF" ? "rose" :
+          "slate";
+
+        const lockTone = s?.is_locked_screen ? "amber" : "sky";
+
+        // 일별 로그: 00:00:00 숨김 + 정렬
+        const validDays = (days || []).filter((d) => d.hms && d.hms !== "00:00:00");
+
+        const sortedDays = (() => {
+          const arr = [...validDays];
+          const monthNum = Number(month);
+
+          if (sortMode === "max") {
+            arr.sort((a, b) => hmsToSeconds(b.hms) - hmsToSeconds(a.hms));
+            return arr;
+          }
+          if (sortMode === "min") {
+            arr.sort((a, b) => hmsToSeconds(a.hms) - hmsToSeconds(b.hms));
+            return arr;
+          }
+
+          arr.sort((a, b) => {
+            const da = parseDateLoose(a.date, monthNum);
+            const db = parseDateLoose(b.date, monthNum);
+            const ta = da ? da.getTime() : -Infinity;
+            const tb = db ? db.getTime() : -Infinity;
+            return ta - tb; // 기본: 오래된 -> 최근
+          });
+
+          if (sortMode === "recent") arr.reverse(); // 최근 -> 오래된
+          return arr;
+        })();
+
+        return (
+          <div className="min-h-screen bg-gradient-to-b from-sky-50 to-slate-100">
+            <div className="w-full flex justify-center px-4 py-8">
+              <div className="max-w-[920px] w-full space-y-4">
+                {/* Header */}
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-3xl font-extrabold text-slate-900 tracking-tight">42 Logtime</div>
+                    <div className="text-sm text-slate-600 mt-1">이번 달 기록을 한눈에 보기</div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {username ? <Badge tone="amber">{username}</Badge> : null}
+                      {location ? <Badge tone="violet">{location}</Badge> : null}
+                      {s?.monitor_state && location ? (
+                        <Badge tone={monitorTone}>
+                          ScreenPower: {s.monitor_state === "MONITOR_ON" ? "ON" : "OFF"}
+                        </Badge>
+                      ) : (
+                        <Badge>ScreenPower: -</Badge>
+                      )}
+                      {(s?.is_locked_screen === true || s?.is_locked_screen === false) && location ? (
+                        <Badge tone={lockTone}>
+                          ScreenLock: {s?.is_locked_screen ? "ON" : "OFF"}
+                        </Badge>
+                      ) : (
+                        <Badge>ScreenLock: -</Badge>
+                      )}
+                      {hasLocation && live.initialized ? <Badge tone="emerald">LIVE</Badge> : <Badge tone="slate">STATIC</Badge>}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Top Stats */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-slate-500">Month</div>
+                        <div className="text-2xl font-extrabold text-slate-900 mt-1">{month}월</div>
+                      </div>
+                      <div className="w-px h-10 bg-slate-200 mx-4" />
+                      <div className="text-right">
+                        <div className="text-xs uppercase tracking-wide text-slate-500">All time (this month)</div>
+                        <div className="text-2xl font-extrabold text-slate-900 mt-1">{alltimeHmsShown}</div>
+                        <div className="text-xs text-slate-500 mt-1">
+                          남은 시간 <span className="font-semibold text-slate-800">{remainText}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-4">
+                    <div className="text-xs uppercase tracking-wide text-slate-500">Progress</div>
+                    <div className="text-2xl font-extrabold text-slate-900 mt-1">{percentShown.toFixed(2)}%</div>
+                    <div className="w-full h-2 bg-slate-100 rounded-full mt-3 overflow-hidden">
+                      <div className="h-full bg-sky-500" style={{ width: `${Math.min(100, Math.max(0, percentShown))}%` }} />
+                    </div>
+                    <div className="text-xs text-slate-500 mt-2">
+                      MAX {maxHour}h 기준 · 남은 시간 <span className="font-semibold text-slate-800">{remainText}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* State + Today */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  <Card
+                    title="Screen 상태"
+                    subtitle="최근 상태 변화 기록"
+                    right={
+                      <div className="flex items-center gap-2">
+                        <Badge tone={s?.is_locked_screen ? "amber" : "sky"}>
+                          {s?.is_locked_screen ? "Locked" : "Online"}
+                        </Badge>
+                        <button
+                          type="button"
+                          onClick={() => setScreenDetailOpen((v) => !v)}
+                          className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-900 text-white hover:bg-slate-800 active:bg-slate-950"
+                        >
+                          {screenDetailOpen ? "접기" : "상세 보기"}
+                        </button>
+                      </div>
+                    }
+                  >
+                    <div className={[
+                      "transition-all duration-300 ease-in-out overflow-hidden",
+                      screenDetailOpen ? "max-h-[520px] opacity-100" : "max-h-0 opacity-0"
+                    ].join(" ")}>
+                      <div className="divide-y divide-slate-100 pt-1">
+                        <KV k="monitor_state" v={s?.monitor_state || "-"} />
+                        <KV k="last_monitor_off_time" v={formatTime(s?.last_monitor_off_time)} />
+                        <KV k="last_monitor_on_time" v={formatTime(s?.last_monitor_on_time)} />
+                        <KV k="is_locked_screen" v={s?.is_locked_screen ? "잠금" : "해제"} />
+                        <KV k="last_screenlock_time" v={formatTime(s?.last_screenlock_time)} />
+                        <div className="flex items-center justify-between gap-3 py-2">
+                          <div className="text-sm text-slate-600">잠금 이후 경과</div>
+                          <div className="text-sm font-semibold text-slate-900 text-right break-all">
+                            {timeAgoFrom(s?.last_screenlock_time)}
+                          </div>
+                        </div>
+                        <KV k="last_screenunlock_time" v={formatTime(s?.last_screenunlock_time)} />
+                        <KV k="updated_at" v={formatTime(s?.updated_at)} />
+                      </div>
+                    </div>
+
+                    {!screenDetailOpen ? (
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm text-slate-600">요약</div>
+                        <div className="text-sm font-semibold text-slate-900">
+                          {s?.monitor_state ? (s.monitor_state === "MONITOR_ON" ? "모니터 켜짐" : "모니터 꺼짐") : "-"}
+                          {" · "}
+                          {s?.is_locked_screen ? "잠금" : "해제"}
+                        </div>
+                      </div>
+                    ) : null}
+                  </Card>
+
+                  <Card title={`${month}월 ${today}일 로그`} subtitle="오늘 누적 시간">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm font-semibold text-slate-900">
+                        {todayObj?.date || `${month}월 ${today}일`}
+                      </div>
+                      <div className="font-mono text-slate-900 font-bold">{todayHmsShown}</div>
+                    </div>
+                  </Card>
+                </div>
+
+                <Card
+                  title={`${month}월 일별 로그`}
+                  subtitle="00:00:00은 자동으로 숨김 · 정렬 가능"
+                  is_no_py={true}
+                  right={
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={sortMode}
+                        onChange={(e) => setSortMode(e.target.value)}
+                        className="text-xs font-semibold rounded-full px-3 py-1.5 bg-slate-100 text-slate-800 ring-1 ring-slate-200 hover:bg-slate-200"
+                      >
+                        <option value="recent">최근순</option>
+                        <option value="old">오래된 순</option>
+                        <option value="max">최다 시간순</option>
+                        <option value="min">최소 시간순</option>
+                      </select>
+                    </div>
+                  }
+                >
+                  {sortedDays.length === 0 ? (
+                    <div className="text-sm text-slate-600 py-4">표시할 데이터가 없어요.</div>
+                  ) : (
+                    <div className="divide-y divide-slate-100">
+                      {sortedDays.map((d) => (
+                        <div key={d.date} className="py-3 flex items-center justify-between">
+                          <div className="text-sm font-semibold text-slate-900">{d.date}</div>
+                          <div className="flex items-center gap-3">
+                            <div className="text-xs text-slate-500">
+                              {secondsToHM(hmsToSeconds(d.hms))}
+                            </div>
+                            <div className="font-mono text-slate-700">{d.hms}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </Card>
+              </div>
+            </div>
+          </div>
+        );
+      }, [state, screenDetailOpen, live, sortMode]);
+
+      return content;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
