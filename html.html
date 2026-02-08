@@ -255,6 +255,28 @@
         }
         return await res.json();
       }
+	function Footer() {
+  const year = new Date().getFullYear();
+
+  return (
+    <footer className="mt-10 border-t border-slate-200 bg-white/70 backdrop-blur">
+      <div className="max-w-[920px] mx-auto px-4 py-6 text-center space-y-1">
+        <div className="text-xs text-slate-500">
+          © {year} 42 Logtime. All rights reserved.
+        </div>
+        <div className="text-xs text-slate-500">
+          Contact ·{" "}
+          <a
+            href="mailto:lkim@student.42gyeongsan.kr"
+            className="font-semibold text-sky-700 hover:text-sky-900 underline"
+          >
+            lkim@student.42gyeongsan.kr
+          </a>
+        </div>
+      </div>
+    </footer>
+  );
+}
 
       // 최초 로드
       useEffect(() => {
@@ -567,7 +589,6 @@
                   </Card>
                 </div>
 
-                {/* Daily list + Sorting */}
                 <Card
                   title={`${month}월 일별 로그`}
                   subtitle="00:00:00은 자동으로 숨김 · 정렬 가능"
@@ -596,17 +617,36 @@
                           <div className="text-sm font-semibold text-slate-900">{d.date}</div>
                           <div className="flex items-center gap-3">
                             <div className="text-xs text-slate-500">
-                              {secondsToHM(hmsToSeconds(d.hms))}
+                              {todayObj.date===d.date?secondsToHM(hmsToSeconds(todayHmsShown)):secondsToHM(hmsToSeconds(d.hms))}
                             </div>
-                            <div className="font-mono text-slate-700">{d.hms}</div>
+                            <div className="font-mono text-slate-700">
+				    {todayObj.date===d.date?todayHmsShown:d.hms}
+			    </div>
                           </div>
                         </div>
                       ))}
                     </div>
                   )}
                 </Card>
-              </div>
+		<div className="w-full flex justify-center pt-4">
+		    <div className="flex flex-col justify-center gap-1">
+	                <div className="w-full text-center text-[#444444] font-bold">
+			    왜 intra42.fr의 시간과 다르게 뜨나요?
+			</div>
+			<div className="text-xs break-all max-w-full">
+			    intra42.fr에서는 <b>분단위</b>, 42Time은 <b>초 단위</b>로 표시합니다.
+			</div>
+			<div className="text-xs break-all max-w-full">
+			    <b>일 최대 12시간</b>으로 자동 제한됩니다.
+			</div>
+			<div className="text-xs break-all max-w-full">
+			    학습시간을 조회하는 즉시 <b>실시간으로 자동 갱신</b>합니다.
+			</div>
+		    </div>
+		</div>
+	      </div>
             </div>
+	    <Footer/>
           </div>
         );
       }, [state, screenDetailOpen, live, sortMode]);
