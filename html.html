@@ -8,14 +8,12 @@
 
   <!-- Favicon (base64) -->
   <script>
-    // SVG -> base64 (UTF-8 안전 처리)
     function svgToBase64(svg) {
       const encoded = encodeURIComponent(svg)
         .replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode("0x" + p1));
       return btoa(encoded);
     }
 
-    // 기본 SVG favicon (원하면 여기만 바꾸면 됨)
     const faviconSvg = `
       <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
         <defs>
@@ -37,10 +35,6 @@
     link.type = "image/svg+xml";
     link.href = "data:image/svg+xml;base64," + faviconBase64;
     document.head.appendChild(link);
-
-    // 만약 PNG base64가 있다면 이렇게 교체 가능:
-    // link.type = "image/png";
-    // link.href = "data:image/png;base64,....";
   </script>
 
   <!-- React (CDN) -->
@@ -68,6 +62,8 @@
 
     const { useEffect, useMemo, useRef, useState } = React;
 
+    const DEFAULT_DAILY_CAP_HOUR = 12;
+
     function extractDay(dateValue) {
       if (dateValue == null) return NaN;
       const n = Number(dateValue);
@@ -76,7 +72,6 @@
       return m ? Number(m[1]) : NaN;
     }
 
-    // "HH:MM:SS" -> seconds
     function hmsToSeconds(hms) {
       if (!hms || typeof hms !== "string") return 0;
       const parts = hms.split(":").map((x) => Number(x));
@@ -85,7 +80,6 @@
       return Math.max(0, h * 3600 + m * 60 + s);
     }
 
-    // seconds -> "HH:MM:SS"
     function secondsToHms(sec) {
       const s = Math.max(0, Math.floor(sec || 0));
       const h = Math.floor(s / 3600);
@@ -94,7 +88,6 @@
       return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
     }
 
-    // seconds -> "H시간 M분"
     function secondsToHM(sec) {
       const s = Math.max(0, Math.floor(sec || 0));
       const h = Math.floor(s / 3600);
@@ -105,7 +98,6 @@
       return `${h}시간 ${m}분`;
     }
 
-    // epoch seconds / numeric-string / iso-string -> Date or null
     function toDate(input) {
       if (input == null || input === "" || input === 0) return null;
       if (
@@ -185,23 +177,20 @@
     }
 
     function calcPercent(usedSec, maxHour) {
-      const maxSec = Math.max(1, Math.floor((Number(maxHour) || 80) * 3600));
+      const maxSec = Math.max(1, Math.floor((Number(maxHour) || 0) * 3600));
       const raw = (Math.max(0, usedSec) / maxSec) * 100;
       return Math.min(100, Math.max(0, raw));
     }
 
     function parseDateLoose(s, month) {
-      // days[].date가 "2월 7일" / "2026-02-07" / "07" 등 섞여도 최대한 맞춰줌
       if (!s) return null;
       const str = String(s).trim();
 
-      // ISO
       if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
         const d = new Date(str + "T00:00:00");
         return isNaN(d.getTime()) ? null : d;
       }
 
-      // "2월 7일" 형태
       const m = str.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
       if (m) {
         const mm = Number(m[1]);
@@ -211,25 +200,21 @@
         return isNaN(d.getTime()) ? null : d;
       }
 
-      // 숫자만(일)
       const day = extractDay(str);
       if (Number.isFinite(day) && Number.isFinite(Number(month))) {
         const y = new Date().getFullYear();
         const d = new Date(y, Number(month) - 1, day, 0, 0, 0);
         return isNaN(d.getTime()) ? null : d;
       }
-
       return null;
     }
 
     function App() {
+      const [searchInput, setSearchInput] = useState("");
       const [state, setState] = useState({ status: "loading" });
       const [screenDetailOpen, setScreenDetailOpen] = useState(false);
+      const [sortMode, setSortMode] = useState("recent");
 
-      // 정렬 옵션
-      const [sortMode, setSortMode] = useState("recent"); // recent | old | max | min
-
-      // live 초기화 여부 분리
       const [live, setLive] = useState({
         initialized: false,
         alltimeSec: 0,
@@ -237,6 +222,33 @@
         dayKey: "",
         monthKey: "",
       });
+
+      const MAX_HOUR_LS_KEY = "42logtime:maxHour";
+      const MAX_DAILY_HOUR_LS_KEY = "42logtime:maxDailyHour";
+
+      const [userMaxHour, setUserMaxHour] = useState(() => {
+        const v = Number(localStorage.getItem(MAX_HOUR_LS_KEY));
+        return Number.isFinite(v) && v >= 0 ? v : 0;
+      });
+
+      const [userMaxHourInput, setUserMaxHourInput] = useState(() => {
+        const raw = localStorage.getItem(MAX_HOUR_LS_KEY);
+        if (raw == null) return "";
+        return String(raw);
+      });
+
+      const [userMaxDailyHour, setUserMaxDailyHour] = useState(() => {
+        const v = Number(localStorage.getItem(MAX_DAILY_HOUR_LS_KEY));
+        return Number.isFinite(v) && v >= 1 && v <= 24 ? v : DEFAULT_DAILY_CAP_HOUR;
+      });
+
+      const [userMaxDailyHourInput, setUserMaxDailyHourInput] = useState(() => {
+        const raw = localStorage.getItem(MAX_DAILY_HOUR_LS_KEY);
+        if (raw == null) return String(DEFAULT_DAILY_CAP_HOUR);
+        return String(raw);
+      });
+
+      const dailyCapSec = Math.max(3600, Math.min(24 * 3600, (Number(userMaxDailyHour) || DEFAULT_DAILY_CAP_HOUR) * 3600));
 
       const reloadingRef = useRef(false);
 
@@ -255,37 +267,60 @@
         }
         return await res.json();
       }
-	function Footer() {
-  const year = new Date().getFullYear();
 
-  return (
-    <footer className="mt-10 border-t border-slate-200 bg-white/70 backdrop-blur">
-      <div className="max-w-[920px] mx-auto px-4 py-6 text-center space-y-1">
-        <div className="text-xs text-slate-500">
-          © {year} 42 Logtime. All rights reserved.
-        </div>
-        <div className="text-xs text-slate-500">
-          Contact ·{" "}
-          <a
-            href="mailto:lkim@student.42gyeongsan.kr"
-            className="font-semibold text-sky-700 hover:text-sky-900 underline"
-          >
-            lkim@student.42gyeongsan.kr
-          </a>
-        </div>
-      </div>
-    </footer>
-  );
-}
+      async function loadTimeByUsername(username) {
+        const u = String(username || "").trim();
+        if (!u) throw new Error("유저명을 입력해 주세요.");
+        const res = await fetch(`/api/time/search?username=${encodeURIComponent(u)}`, { credentials: "include" });
+        if (res.status === 401) {
+          const body = await res.json().catch(() => null);
+          if (body && body.authorize_url) {
+            window.location.href = body.authorize_url;
+            return null;
+          }
+        }
+        if (res.status === 404) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error === "user not found" ? `유저를 찾을 수 없습니다: ${u}` : `Not found (${res.status})`);
+        }
+        if (res.status === 400) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || "잘못된 요청입니다.");
+        }
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API error (${res.status}): ${text}`);
+        }
+        return await res.json();
+      }
 
-      // 최초 로드
+      function Footer() {
+        const year = new Date().getFullYear();
+        return (
+          <footer className="mt-10 border-t border-slate-200 bg-white/70 backdrop-blur">
+            <div className="max-w-[920px] mx-auto px-4 py-6 text-center space-y-1">
+              <div className="text-xs text-slate-500">© {year} 42 Logtime. All rights reserved.</div>
+              <div className="text-xs text-slate-500">
+                Contact ·{" "}
+                <a
+                  href="mailto:lkim@student.42gyeongsan.kr"
+                  className="font-semibold text-sky-700 hover:text-sky-900 underline"
+                >
+                  lkim@student.42gyeongsan.kr
+                </a>
+              </div>
+            </div>
+          </footer>
+        );
+      }
+
       useEffect(() => {
         let cancelled = false;
         (async () => {
           try {
             const data = await loadTime();
             if (!data) return;
-            if (!cancelled) setState({ status: "ready", data });
+            if (!cancelled) setState({ status: "ready", data, isSearchResult: false });
           } catch (e) {
             if (!cancelled) setState({ status: "error", error: String(e?.message || e) });
           }
@@ -293,7 +328,34 @@
         return () => { cancelled = true; };
       }, []);
 
-      // state.data 준비되면 live 베이스 세팅
+      async function handleSearch(e) {
+        e?.preventDefault();
+        const u = searchInput.trim();
+        if (!u) {
+          setState((prev) => ({ ...prev, status: "error", error: "유저명을 입력해 주세요." }));
+          return;
+        }
+        setState((prev) => ({ ...prev, status: "loading" }));
+        try {
+          const data = await loadTimeByUsername(u);
+          if (!data) return;
+          setState({ status: "ready", data, isSearchResult: true });
+        } catch (e) {
+          setState({ status: "error", error: String(e?.message || e) });
+        }
+      }
+
+      async function loadSelf() {
+        setState((prev) => ({ ...prev, status: "loading" }));
+        try {
+          const data = await loadTime();
+          if (!data) return;
+          setState({ status: "ready", data, isSearchResult: false });
+        } catch (e) {
+          setState({ status: "error", error: String(e?.message || e) });
+        }
+      }
+
       useEffect(() => {
         if (state.status !== "ready") return;
 
@@ -308,7 +370,11 @@
 
         const today = now.getDate();
         const todayObj = (days || []).find((d) => extractDay(d.date) === today);
-        const todaySecBase = todayObj ? hmsToSeconds(todayObj.hms) : 0;
+
+        // 서버값도 이미 12시간 넘는 경우가 있으면 클램프해서 시작
+        const todaySecBaseRaw = todayObj ? hmsToSeconds(todayObj.hms) : 0;
+        const cap = Math.max(3600, Math.min(24 * 3600, (Number(userMaxDailyHour) || DEFAULT_DAILY_CAP_HOUR) * 3600));
+        const todaySecBase = Math.min(cap, todaySecBaseRaw);
 
         setLive({
           initialized: true,
@@ -317,15 +383,32 @@
           dayKey,
           monthKey,
         });
+      }, [state.status, state.data, userMaxDailyHour]);
+
+      useEffect(() => {
+        if (state.status !== "ready") return;
+
+        const lsRaw = localStorage.getItem(MAX_HOUR_LS_KEY);
+        if (lsRaw != null) return;
+
+        const serverMax = Number(state.data?.max_hour);
+        if (Number.isFinite(serverMax) && serverMax >= 0) {
+          setUserMaxHour(serverMax);
+          setUserMaxHourInput(String(serverMax));
+          localStorage.setItem(MAX_HOUR_LS_KEY, String(serverMax));
+        }
       }, [state.status, state.data]);
 
-      // location 있을 때만 1초 증가 + 날짜/월 변경 처리
+      // LIVE tick (하루 최대 시간 적용) — 본인/검색 유저 모두 location 있으면 실시간 증가
       useEffect(() => {
         if (state.status !== "ready") return;
 
         const data = state.data || {};
         const hasLocation = !!data.location;
         if (!hasLocation) return;
+
+        const isSearchResult = state.isSearchResult;
+        const currentUsername = state.data?.username;
 
         const id = setInterval(async () => {
           const now = new Date();
@@ -341,11 +424,32 @@
             dayChanged = prev.dayKey && curDayKey !== prev.dayKey;
             monthChanged = prev.monthKey && curMonthKey !== prev.monthKey;
 
-            let nextAll = prev.alltimeSec + 1;
-            let nextToday = prev.todaySec + 1;
+            // 날짜/월 바뀜 처리(기존 로직 유지)
+            if (monthChanged) {
+              return {
+                ...prev,
+                alltimeSec: 0,
+                todaySec: 0,
+                dayKey: curDayKey,
+                monthKey: curMonthKey,
+              };
+            }
+            if (dayChanged) {
+              return {
+                ...prev,
+                todaySec: 0,
+                dayKey: curDayKey,
+                monthKey: curMonthKey,
+              };
+            }
 
-            if (dayChanged) nextToday = 0;
-            if (monthChanged) { nextAll = 0; nextToday = 0; }
+            const capSec = Math.max(3600, Math.min(24 * 3600, (Number(userMaxDailyHour) || DEFAULT_DAILY_CAP_HOUR) * 3600));
+            const atCap = prev.todaySec >= capSec;
+
+            const nextToday = atCap ? prev.todaySec : Math.min(capSec, prev.todaySec + 1);
+
+            // today가 증가하지 않으면 alltime도 증가시키지 않음(오늘분 누적이 멈췄으니까)
+            const nextAll = atCap ? prev.alltimeSec : (prev.alltimeSec + 1);
 
             return {
               ...prev,
@@ -359,8 +463,10 @@
           if ((dayChanged || monthChanged) && !reloadingRef.current) {
             reloadingRef.current = true;
             try {
-              const newData = await loadTime();
-              if (newData) setState({ status: "ready", data: newData });
+              const newData = isSearchResult && currentUsername
+                ? await loadTimeByUsername(currentUsername)
+                : await loadTime();
+              if (newData) setState({ status: "ready", data: newData, isSearchResult });
             } catch (e) {
               console.log("refetch failed:", e);
             } finally {
@@ -370,16 +476,48 @@
         }, 1000);
 
         return () => clearInterval(id);
-      }, [state.status, state.data]);
+      }, [state.status, state.data, userMaxDailyHour]);
+
+      const fixedSearchBar = (
+        <div className="sticky top-0 z-10 w-full border-b border-slate-200 bg-white/95 backdrop-blur-md shadow-sm">
+          <div className="max-w-[920px] mx-auto px-4 py-3 flex flex-wrap gap-3 items-center">
+            <form onSubmit={handleSearch} className="flex-1 flex gap-2 min-w-0">
+              <input
+                type="text"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder="유저명 검색 (42 로그인 아이디)"
+                className="flex-1 min-w-0 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium outline-none ring-sky-200 focus:ring-2 placeholder:text-slate-400"
+              />
+              <button
+                type="submit"
+                className="shrink-0 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-sky-700 active:bg-sky-800 disabled:opacity-50"
+              >
+                조회
+              </button>
+            </form>
+            <button
+              type="button"
+              onClick={loadSelf}
+              className="shrink-0 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 active:bg-slate-100"
+            >
+              내 정보로 보기
+            </button>
+          </div>
+        </div>
+      );
 
       const content = useMemo(() => {
         if (state.status === "loading") {
           return (
-            <div className="min-h-screen bg-gradient-to-b from-sky-50 to-slate-100 flex items-center justify-center p-6">
-              <div className="max-w-[520px] w-full bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-5">
-                <div className="text-lg font-extrabold text-slate-900">불러오는 중...</div>
-                <div className="mt-4 h-2 bg-slate-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-sky-500 w-1/3 animate-pulse" />
+            <div className="min-h-screen bg-gradient-to-b from-sky-50 to-slate-100">
+              {fixedSearchBar}
+              <div className="max-w-[920px] mx-auto px-4 pt-8 flex justify-center">
+                <div className="w-full max-w-md bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-6">
+                  <div className="text-lg font-extrabold text-slate-900">불러오는 중...</div>
+                  <div className="mt-4 h-2 bg-slate-100 rounded-full overflow-hidden">
+                    <div className="h-full bg-sky-500 w-1/3 animate-pulse" />
+                  </div>
                 </div>
               </div>
             </div>
@@ -388,15 +526,27 @@
 
         if (state.status === "error") {
           return (
-            <div className="min-h-screen bg-gradient-to-b from-sky-50 to-slate-100 flex items-center justify-center p-6">
-              <div className="max-w-[860px] w-full bg-white rounded-2xl shadow-sm ring-1 ring-rose-200 p-5">
-                <div className="text-lg font-extrabold text-rose-700">에러</div>
-                <pre className="mt-3 text-xs whitespace-pre-wrap text-rose-900 bg-rose-50 border border-rose-100 rounded-xl p-3">
-                  {state.error}
-                </pre>
-                <a className="inline-block mt-4 text-sm font-semibold text-sky-700 hover:text-sky-900 underline" href="/time">
-                  새로고침
-                </a>
+            <div className="min-h-screen bg-gradient-to-b from-sky-50 to-slate-100">
+              {fixedSearchBar}
+              <div className="max-w-[920px] mx-auto px-4 pt-8">
+                <div className="bg-white rounded-2xl shadow-sm ring-1 ring-rose-200 p-6">
+                  <div className="text-lg font-extrabold text-rose-700">에러</div>
+                  <pre className="mt-3 text-xs whitespace-pre-wrap text-rose-900 bg-rose-50 border border-rose-100 rounded-xl p-3">
+                    {state.error}
+                  </pre>
+                  <div className="mt-4 flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={loadSelf}
+                      className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                    >
+                      내 정보로 보기
+                    </button>
+                    <a href="/time" className="inline-flex items-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+                      /time 이동
+                    </a>
+                  </div>
+                </div>
               </div>
             </div>
           );
@@ -411,19 +561,40 @@
         const todayObj = (days || []).find((d) => extractDay(d.date) === today);
         const todayHmsStatic = todayObj?.hms || "00:00:00";
 
-        const alltimeHmsShown =
-          hasLocation && live.initialized ? secondsToHms(live.alltimeSec) : alltime_hms;
+        // 하루 최대 인정 시간으로 일별 캡 적용 후 월 합계 계산
+        // 입력값이 유효하면 그대로 사용해, 입력 중에도 퍼센트 즉시 반영
+        const parsedDailyCap = userMaxDailyHourInput !== "" ? Number(userMaxDailyHourInput) : null;
+        const capSec = (Number.isFinite(parsedDailyCap) && parsedDailyCap >= 1 && parsedDailyCap <= 24)
+          ? Math.max(3600, Math.min(24 * 3600, parsedDailyCap * 3600))
+          : dailyCapSec;
+        let clampedAlltimeSec = 0;
+        for (const d of days || []) {
+          const daySec = hmsToSeconds(d.hms);
+          const isToday = extractDay(d.date) === today;
+          if (isToday && hasLocation && live.initialized) {
+            clampedAlltimeSec += Math.min(capSec, live.todaySec);
+          } else {
+            clampedAlltimeSec += Math.min(capSec, daySec);
+          }
+        }
+        const alltimeHmsShown = (days?.length ? secondsToHms(clampedAlltimeSec) : (hasLocation && live.initialized ? secondsToHms(live.alltimeSec) : alltime_hms));
 
         const todayHmsShown =
-          hasLocation && live.initialized ? secondsToHms(live.todaySec) : todayHmsStatic;
+          hasLocation && live.initialized ? secondsToHms(Math.min(capSec, live.todaySec)) : secondsToHms(Math.min(capSec, hmsToSeconds(todayHmsStatic)));
 
-        const parsedMax = Number(data.max_hour);
-        const maxHour = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 80;
+        const serverMax = Number(data.max_hour);
+        // 입력값이 유효하면 그대로 사용해, 입력 중에도 퍼센트 즉시 반영
+        const parsedMaxHour = userMaxHourInput !== "" ? Number(userMaxHourInput) : userMaxHour;
+        const maxHour =
+          (Number.isFinite(parsedMaxHour) && parsedMaxHour >= 0) ? parsedMaxHour :
+          (Number.isFinite(userMaxHour) && userMaxHour >= 0) ? userMaxHour :
+          (Number.isFinite(serverMax) && serverMax >= 0) ? serverMax :
+          80;
 
-        const usedSec = (hasLocation && live.initialized) ? live.alltimeSec : hmsToSeconds(alltime_hms);
-        const percentShown = hasLocation && live.initialized
-          ? calcPercent(usedSec, maxHour)
-          : (Number.isFinite(Number(percent)) ? Number(percent) : 0);
+        const usedSec = days?.length ? clampedAlltimeSec : ((hasLocation && live.initialized) ? live.alltimeSec : hmsToSeconds(alltime_hms));
+
+        const percentShown = maxHour <= 0
+          ? 0 : calcPercent(usedSec, maxHour);
 
         const remainSec = Math.max(0, maxHour * 3600 - usedSec);
         const remainText = secondsToHM(remainSec);
@@ -435,7 +606,6 @@
 
         const lockTone = s?.is_locked_screen ? "amber" : "sky";
 
-        // 일별 로그: 00:00:00 숨김 + 정렬
         const validDays = (days || []).filter((d) => d.hms && d.hms !== "00:00:00");
 
         const sortedDays = (() => {
@@ -451,24 +621,23 @@
             return arr;
           }
 
-          // 날짜 정렬(최근/오래된)
           arr.sort((a, b) => {
             const da = parseDateLoose(a.date, monthNum);
             const db = parseDateLoose(b.date, monthNum);
             const ta = da ? da.getTime() : -Infinity;
             const tb = db ? db.getTime() : -Infinity;
-            return ta - tb; // 기본: 오래된 -> 최근
+            return ta - tb;
           });
 
-          if (sortMode === "recent") arr.reverse(); // 최근 -> 오래된
+          if (sortMode === "recent") arr.reverse();
           return arr;
         })();
 
         return (
           <div className="min-h-screen bg-gradient-to-b from-sky-50 to-slate-100">
+            {fixedSearchBar}
             <div className="w-full flex justify-center px-4 py-8">
               <div className="max-w-[920px] w-full space-y-4">
-                {/* Header */}
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="text-3xl font-extrabold text-slate-900 tracking-tight">42 Logtime</div>
@@ -482,20 +651,23 @@
                         </Badge>
                       ) : username=="lkim" ? (
                         <Badge>ScreenPower: -</Badge>
-			) : <></>}
+                      ) : <></>}
                       {username=="lkim"&&(s?.is_locked_screen === true || s?.is_locked_screen === false) && location ? (
                         <Badge tone={lockTone}>
                           ScreenLock: {s?.is_locked_screen ? "ON" : "OFF"}
                         </Badge>
                       ) : username=="lkim" ? (
                         <Badge>ScreenLock: -</Badge>
-			) : <></>}
+                      ) : <></>}
                       {hasLocation && live.initialized ? <Badge tone="emerald">LIVE</Badge> : <Badge tone="slate">STATIC</Badge>}
+                      {/* capSec 도달 시 배지 */}
+                      {hasLocation && live.initialized && live.todaySec >= capSec ? (
+                        <Badge tone="rose">DAILY CAP {(capSec / 3600) | 0}h</Badge>
+                      ) : null}
                     </div>
                   </div>
                 </div>
 
-                {/* Top Stats */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div className="bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-4">
                     <div className="flex items-center justify-between">
@@ -520,66 +692,88 @@
                     <div className="w-full h-2 bg-slate-100 rounded-full mt-3 overflow-hidden">
                       <div className="h-full bg-sky-500" style={{ width: `${Math.min(100, Math.max(0, percentShown))}%` }} />
                     </div>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-4">
+                      <div className="flex items-center gap-2">
+                        <div className="text-xs font-semibold text-slate-600">MAX 시간</div>
+                        <input
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          value={userMaxHourInput}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            const onlyDigits = raw.replace(/[^\d]/g, "");
+                            setUserMaxHourInput(onlyDigits);
+
+                            if (onlyDigits === "") {
+                              setUserMaxHour(0);
+                              localStorage.setItem(MAX_HOUR_LS_KEY, "0");
+                              return;
+                            }
+
+                            const n = Number(onlyDigits);
+                            if (Number.isFinite(n) && n >= 0) {
+                              setUserMaxHour(n);
+                              localStorage.setItem(MAX_HOUR_LS_KEY, String(n));
+                            }
+                          }}
+                          onBlur={() => {
+                            if (userMaxHourInput === "") setUserMaxHourInput("0");
+                          }}
+                          className="w-24 rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold outline-none ring-blue-200 focus:ring-4"
+                          placeholder="0"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="text-xs font-semibold text-slate-600">하루 최대 인정 (시간)</div>
+                        <input
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          value={userMaxDailyHourInput}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            const onlyDigits = raw.replace(/[^\d]/g, "");
+                            setUserMaxDailyHourInput(onlyDigits);
+
+                            if (onlyDigits === "") {
+                              setUserMaxDailyHour(DEFAULT_DAILY_CAP_HOUR);
+                              localStorage.setItem(MAX_DAILY_HOUR_LS_KEY, String(DEFAULT_DAILY_CAP_HOUR));
+                              return;
+                            }
+
+                            const n = Number(onlyDigits);
+                            if (Number.isFinite(n) && n >= 1 && n <= 24) {
+                              setUserMaxDailyHour(n);
+                              localStorage.setItem(MAX_DAILY_HOUR_LS_KEY, String(n));
+                            }
+                          }}
+                          onBlur={() => {
+                            const n = Number(userMaxDailyHourInput);
+                            if (userMaxDailyHourInput === "" || !Number.isFinite(n) || n < 1 || n > 24) {
+                              const val = Number.isFinite(userMaxDailyHour) && userMaxDailyHour >= 1 && userMaxDailyHour <= 24 ? userMaxDailyHour : DEFAULT_DAILY_CAP_HOUR;
+                              setUserMaxDailyHour(val);
+                              setUserMaxDailyHourInput(String(val));
+                              localStorage.setItem(MAX_DAILY_HOUR_LS_KEY, String(val));
+                            }
+                          }}
+                          className="w-20 rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold outline-none ring-blue-200 focus:ring-4"
+                          placeholder={String(DEFAULT_DAILY_CAP_HOUR)}
+                          min={1}
+                          max={24}
+                        />
+                      </div>
+                    </div>
+
                     <div className="text-xs text-slate-500 mt-2">
-                      MAX {maxHour}h 기준 · 남은 시간 <span className="font-semibold text-slate-800">{remainText}</span>
+                      MAX {maxHour}h 기준 · 하루 최대 {userMaxDailyHour}h 인정 · 남은 시간 <span className="font-semibold text-slate-800">{remainText}</span>
                     </div>
                   </div>
                 </div>
 
-		<div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-		{/* State + Today */}
-		{username === "lkim" ? (
-                  <Card
-                    title="Screen 상태"
-                    subtitle="최근 상태 변화 기록"
-                    right={
-                      <div className="flex items-center gap-2">
-                        <Badge tone={s?.is_locked_screen ? "amber" : "sky"}>
-                          {s?.is_locked_screen ? "Locked" : "Online"}
-                        </Badge>
-                        <button
-                          type="button"
-                          onClick={() => setScreenDetailOpen((v) => !v)}
-                          className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-900 text-white hover:bg-slate-800 active:bg-slate-950"
-                        >
-                          {screenDetailOpen ? "접기" : "상세 보기"}
-                        </button>
-                      </div>
-                    }
-                  >
-		  <div className={[
-                      "transition-all duration-300 ease-in-out overflow-hidden",
-                      screenDetailOpen ? "max-h-[520px] opacity-100" : "max-h-0 opacity-0"
-                    ].join(" ")}>
-                      <div className="divide-y divide-slate-100 pt-1">
-                        <KV k="monitor_state" v={s?.monitor_state || "-"} />
-                        <KV k="last_monitor_off_time" v={formatTime(s?.last_monitor_off_time)} />
-                        <KV k="last_monitor_on_time" v={formatTime(s?.last_monitor_on_time)} />
-                        <KV k="is_locked_screen" v={s?.is_locked_screen ? "잠금" : "해제"} />
-                        <KV k="last_screenlock_time" v={formatTime(s?.last_screenlock_time)} />
-                        <div className="flex items-center justify-between gap-3 py-2">
-                          <div className="text-sm text-slate-600">잠금 이후 경과</div>
-                          <div className="text-sm font-semibold text-slate-900 text-right break-all">
-                            {timeAgoFrom(s?.last_screenlock_time)}
-                          </div>
-                        </div>
-                        <KV k="last_screenunlock_time" v={formatTime(s?.last_screenunlock_time)} />
-                        <KV k="updated_at" v={formatTime(s?.updated_at)} />
-                      </div>
-		    </div>
-                    {!screenDetailOpen ? (
-                      <div className="flex items-center justify-between">
-                        <div className="text-sm text-slate-600">요약</div>
-                        <div className="text-sm font-semibold text-slate-900">
-                          {s?.monitor_state ? (s.monitor_state === "MONITOR_ON" ? "모니터 켜짐" : "모니터 꺼짐") : "-"}
-                          {" · "}
-                          {s?.is_locked_screen ? "잠금" : "해제"}
-                        </div>
-                      </div>
-                    ) : null}
-                  </Card> ) : (<></>)}
 
-                  <Card title={`${month}월 ${today}일 로그`} subtitle="오늘 누적 시간">
+                  {username === "lkim" ? (
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <Card title={`${month}월 ${today}일 로그`} subtitle={`오늘 누적 시간(하루 최대 ${userMaxDailyHour}h 인정)`}>
                     <div className="flex items-center justify-between">
                       <div className="text-sm font-semibold text-slate-900">
                         {todayObj?.date || `${month}월 ${today}일`}
@@ -587,7 +781,69 @@
                       <div className="font-mono text-slate-900 font-bold">{todayHmsShown}</div>
                     </div>
                   </Card>
+                    <Card
+                      title="Screen 상태"
+                      subtitle="최근 상태 변화 기록"
+                      right={
+                        <div className="flex items-center gap-2">
+                          <Badge tone={s?.is_locked_screen ? "amber" : "sky"}>
+                            {s?.is_locked_screen ? "Locked" : "Online"}
+                          </Badge>
+                          <button
+                            type="button"
+                            onClick={() => setScreenDetailOpen((v) => !v)}
+                            className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-900 text-white hover:bg-slate-800 active:bg-slate-950"
+                          >
+                            {screenDetailOpen ? "접기" : "상세 보기"}
+                          </button>
+                        </div>
+                      }
+                    >
+                      <div className={[
+                        "transition-all duration-300 ease-in-out overflow-hidden",
+                        screenDetailOpen ? "max-h-[520px] opacity-100" : "max-h-0 opacity-0"
+                      ].join(" ")}>
+                        <div className="divide-y divide-slate-100 pt-1">
+                          <KV k="monitor_state" v={s?.monitor_state || "-"} />
+                          <KV k="last_monitor_off_time" v={formatTime(s?.last_monitor_off_time)} />
+                          <KV k="last_monitor_on_time" v={formatTime(s?.last_monitor_on_time)} />
+                          <KV k="is_locked_screen" v={s?.is_locked_screen ? "잠금" : "해제"} />
+                          <KV k="last_screenlock_time" v={formatTime(s?.last_screenlock_time)} />
+                          <div className="flex items-center justify-between gap-3 py-2">
+                            <div className="text-sm text-slate-600">잠금 이후 경과</div>
+                            <div className="text-sm font-semibold text-slate-900 text-right break-all">
+                              {timeAgoFrom(s?.last_screenlock_time)}
+                            </div>
+                          </div>
+                          <KV k="last_screenunlock_time" v={formatTime(s?.last_screenunlock_time)} />
+                          <KV k="updated_at" v={formatTime(s?.updated_at)} />
+                        </div>
+                      </div>
+                      {!screenDetailOpen ? (
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm text-slate-600">요약</div>
+                          <div className="text-sm font-semibold text-slate-900">
+                            {s?.monitor_state ? (s.monitor_state === "MONITOR_ON" ? "모니터 켜짐" : "모니터 꺼짐") : "-"}
+                            {" · "}
+                            {s?.is_locked_screen ? "잠금" : "해제"}
+                          </div>
+                        </div>
+                      ) : null}
+                    </Card>
+
                 </div>
+                  ) : (<div className="grid grid-cols-1 lg:grid-cols-1 gap-3">
+                    <Card title={`${month}월 ${today}일 로그`} subtitle={`오늘 누적 시간(하루 최대 ${userMaxDailyHour}h 인정)`}>
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm font-semibold text-slate-900">
+                        {todayObj?.date || `${month}월 ${today}일`}
+                      </div>
+                      <div className="font-mono text-slate-900 font-bold">{todayHmsShown}</div>
+                    </div>
+                  </Card>
+                </div>)}
+
+
 
                 <Card
                   title={`${month}월 일별 로그`}
@@ -612,44 +868,50 @@
                     <div className="text-sm text-slate-600 py-4">표시할 데이터가 없어요.</div>
                   ) : (
                     <div className="divide-y divide-slate-100">
-                      {sortedDays.map((d) => (
-                        <div key={d.date} className="py-3 flex items-center justify-between">
-                          <div className="text-sm font-semibold text-slate-900">{d.date}</div>
-                          <div className="flex items-center gap-3">
-                            <div className="text-xs text-slate-500">
-                              {todayObj.date===d.date?secondsToHM(hmsToSeconds(todayHmsShown)):secondsToHM(hmsToSeconds(d.hms))}
+                      {sortedDays.map((d) => {
+                        const dayHmsCapped = todayObj?.date === d.date ? todayHmsShown : secondsToHms(Math.min(hmsToSeconds(d.hms), dailyCapSec));
+                        return (
+                          <div key={d.date} className="py-3 flex items-center justify-between">
+                            <div className="text-sm font-semibold text-slate-900">{d.date}</div>
+                            <div className="flex items-center gap-3">
+                              <div className="text-xs text-slate-500">
+                                {secondsToHM(hmsToSeconds(dayHmsCapped))}
+                              </div>
+                              <div className="font-mono text-slate-700">
+                                {dayHmsCapped}
+                              </div>
                             </div>
-                            <div className="font-mono text-slate-700">
-				    {todayObj.date===d.date?todayHmsShown:d.hms}
-			    </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </Card>
-		<div className="w-full flex justify-center pt-4">
-		    <div className="flex flex-col justify-center gap-1">
-	                <div className="w-full text-center text-[#444444] font-bold">
-			    왜 intra42.fr의 시간과 다르게 뜨나요?
-			</div>
-			<div className="text-xs break-all max-w-full">
-			    intra42.fr에서는 <b>분단위</b>, 42Time은 <b>초 단위</b>로 표시합니다.
-			</div>
-			<div className="text-xs break-all max-w-full">
-			    <b>일 최대 12시간</b>으로 자동 제한됩니다.
-			</div>
-			<div className="text-xs break-all max-w-full">
-			    학습시간을 조회하는 즉시 <b>실시간으로 자동 갱신</b>합니다.
-			</div>
-		    </div>
-		</div>
-	      </div>
+
+                <div className="w-full flex justify-center pt-4">
+                  <div className="flex flex-col justify-center gap-1">
+                    <div className="w-full text-center text-[#444444] font-bold">
+                      왜 intra42.fr의 시간과 다르게 뜨나요?
+                    </div>
+                    <div className="text-xs break-all max-w-full">
+                      intra42.fr에서는 <b>분 단위</b>, 42Time은 <b>초 단위</b>로 표시합니다.
+                    </div>
+                    <div className="text-xs break-all max-w-full">
+                      <b>일 최대 12시간</b>으로 자동 제한됩니다.
+                    </div>
+                    <div className="text-xs break-all max-w-full">
+                      학습시간을 조회하는 즉시 <b>실시간으로 자동 갱신</b>합니다.
+                    </div>
+                  </div>
+                </div>
+
+              </div>
             </div>
-	    <Footer/>
+
+            <Footer/>
           </div>
         );
-      }, [state, screenDetailOpen, live, sortMode]);
+      }, [state, screenDetailOpen, live, sortMode, userMaxHour, userMaxHourInput, userMaxDailyHour, userMaxDailyHourInput, searchInput]);
 
       return content;
     }
