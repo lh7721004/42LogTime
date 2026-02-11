@@ -10,7 +10,6 @@ from fastapi import FastAPI, Query, Body
 from fastapi.requests import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from zoneinfo import ZoneInfo
-
 app = FastAPI()
 users = {}
 api_token: Optional[str] = None
@@ -43,6 +42,7 @@ def _get_config() -> Dict[str, str]:
         "redirect_uri": redirect_uri,
     }
 
+
 def _authorize_url() -> str:
     cfg = _get_config()
     return (
@@ -51,6 +51,7 @@ def _authorize_url() -> str:
         f"&redirect_uri={requests.utils.quote(cfg['redirect_uri'], safe='')}"
         "&response_type=code"
     )
+
 
 def get_api_token() -> str:
     cfg = _get_config()
@@ -175,13 +176,13 @@ def _add_duration_per_day(
     # last partial (same date)
     sec = int((end_local - cursor).total_seconds())
     key = cursor.date().isoformat()
-    
+
     # 일일 최대 학습시간 적용
     # per_day_seconds[key] = per_day_seconds.get(key, 0) + max(0, sec)
     current = per_day_seconds.get(key, 0)
     added = max(0, sec)
-    per_day_seconds[key] = min(current + added,MAX_DAILY_SECONDS)
-
+    # per_day_seconds[key] = min(current + added,MAX_DAILY_SECONDS)
+    per_day_seconds[key] = current + added
 
 
 def _fetch_locations_in_range(
@@ -264,8 +265,8 @@ def _build_month_payload_from_locations(locations: List[Dict[str, Any]], now_loc
         "percent": percent,
         "max_hour": MAX_HOUR,
         "days": days,
-		"location": location,
-		"state": state,
+                "location": location,
+                "state": state,
         "username": username
     }
 
@@ -342,7 +343,6 @@ def get_time(req: Request):
     with open("html.html", "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 
-
 @app.get("/api/time")
 def api_time(req: Request):
     """
@@ -404,6 +404,112 @@ def api_time(req: Request):
         )
 
     return JSONResponse(content=_build_month_payload_from_locations(locations, now_local, location, state, username))
+@app.get("/api/time/search")
+def api_time_search(req: Request, username: Optional[str] = Query(None, alias="username")):
+    """
+    유저명(login)으로 해당 유저의 이번 달 학습 시간을 조회합니다.
+    GET /api/time/search?username=로그인아이디
+    - 로그인 필수 (access_token 쿠키)
+    - username 쿼리 파라미터 필수
+    """
+    global api_token
+    me = _ensure_user(req)
+    if me is None:
+        return JSONResponse(status_code=401, content={"authorize_url": _authorize_url()})
+
+    if not username or not username.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"error": "username query parameter is required"},
+        )
+
+    username = username.strip()
+
+    # 대상 유저 정보 조회: users 캐시 먼저, 없으면 42 API
+    target = users.get(username)
+    if not target:
+        if api_token is None:
+            api_token = get_api_token()
+        try:
+            r = requests.get(
+                "https://api.intra.42.fr/v2/users",
+                headers={"Authorization": f"Bearer {api_token}"},
+                params={"filter[login]": username},
+                timeout=10,
+            )
+            if not r.ok:
+                if r.status_code == 401:
+                    _refresh_api_token()
+                    r = requests.get(
+                        "https://api.intra.42.fr/v2/users",
+                        headers={"Authorization": f"Bearer {api_token}"},
+                        params={"filter[login]": username},
+                        timeout=10,
+                    )
+                if not r.ok:
+                    return JSONResponse(
+                        status_code=r.status_code,
+                        content={"error": "failed to fetch user", "detail": r.text[:200]},
+                    )
+            data = r.json()
+            if not data:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": "user not found", "username": username},
+                )
+            target = data[0]
+            users[target["login"]] = target
+            users[target["id"]] = target
+        except Exception as e:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "failed to fetch user", "detail": str(e)},
+            )
+
+    userid = target["id"]
+    location = target.get("location", "")
+    state = target.get("state", {})
+
+    if api_token is None:
+        api_token = get_api_token()
+
+    now_local = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    month_start_local, _ = _month_range_local(now_local)
+    month_begin_utc = _iso_utc(month_start_local)
+    end_utc = _iso_utc(now_local)
+
+    def _do_fetch() -> List[Dict[str, Any]]:
+        return _fetch_locations_in_range(userid, api_token, month_begin_utc, end_utc)
+
+    try:
+        locations = _do_fetch()
+    except RuntimeError as e:
+        err_msg = str(e)
+        if "401" in err_msg or "expired" in err_msg.lower():
+            try:
+                _refresh_api_token()
+                locations = _do_fetch()
+            except Exception:
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": "failed to fetch locations", "detail": str(e)},
+                )
+        else:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "failed to fetch locations", "detail": err_msg},
+            )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "failed to fetch locations", "detail": str(e)},
+        )
+
+    payload = _build_month_payload_from_locations(
+        locations, now_local, location, state, target["login"]
+    )
+    return JSONResponse(content=payload)
+
 @app.post("/api/state")
 def set_user_state(
     payload: Dict[str, Any] = Body(...)
