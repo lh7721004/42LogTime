@@ -1,6 +1,8 @@
 .vendor/
 __pycache__/
 *.pyc
-con.config
-server.log
-plans.sqlite3
+*.plist
+*.log
+*.sqlite3
+*.config
+.env
