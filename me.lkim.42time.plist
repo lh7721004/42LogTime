@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>me.lkim.42time</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/lkim/Library/Python/3.9/bin/uvicorn</string>
+        <string>server:app</string>
+        <string>--host</string>
+        <string>::</string>
+        <string>--port</string>
+        <string>4460</string>
+        <string>--proxy-headers</string>
+        <string>--forwarded-allow-ips=*</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/lkim/42Time</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/Users/lkim/Library/Python/3.9/bin</string>
+        <key>HOME</key>
+        <string>/Users/lkim</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/42time-uvicorn.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/42time-uvicorn.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>

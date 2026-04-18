@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import datetime
 import os
+import sqlite3
+import sys
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".vendor"))
+
+from korean_lunar_calendar import KoreanLunarCalendar
 import requests
 from fastapi import FastAPI, Query, Body
 
@@ -15,6 +21,152 @@ users = {}
 api_token: Optional[str] = None
 MAX_HOUR = 80
 MAX_DAILY_SECONDS = 12 * 60 * 60  # 12시간 = 43200초
+PLAN_DB_PATH = os.path.join(os.path.dirname(__file__), "plans.sqlite3")
+plan_db_lock = threading.Lock()
+
+
+def _get_plan_db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(PLAN_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_plan_db() -> None:
+    with plan_db_lock:
+        conn = _get_plan_db_conn()
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS study_plans (
+                    username TEXT NOT NULL,
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    day INTEGER NOT NULL,
+                    goal_hms TEXT NOT NULL,
+                    PRIMARY KEY (username, year, month, day)
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _load_month_plan(username: str, year: int, month: int) -> Dict[str, str]:
+    _init_plan_db()
+    conn = _get_plan_db_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT day, goal_hms
+            FROM study_plans
+            WHERE username = ? AND year = ? AND month = ?
+            ORDER BY day ASC
+            """,
+            (username, year, month),
+        ).fetchall()
+        return {str(int(row["day"])): str(row["goal_hms"]) for row in rows}
+    finally:
+        conn.close()
+
+
+def _save_plan_value(username: str, year: int, month: int, day: int, goal_hms: str) -> Dict[str, str]:
+    _init_plan_db()
+    with plan_db_lock:
+        conn = _get_plan_db_conn()
+        try:
+            if not goal_hms:
+                conn.execute(
+                    """
+                    DELETE FROM study_plans
+                    WHERE username = ? AND year = ? AND month = ? AND day = ?
+                    """,
+                    (username, year, month, day),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO study_plans (username, year, month, day, goal_hms)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(username, year, month, day)
+                    DO UPDATE SET goal_hms = excluded.goal_hms
+                    """,
+                    (username, year, month, day, goal_hms),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    return _load_month_plan(username, year, month)
+
+
+def _solar_from_lunar(year: int, month: int, day: int, is_intercalation: bool = False) -> datetime.date:
+    calendar = KoreanLunarCalendar()
+    calendar.setLunarDate(year, month, day, is_intercalation)
+    return datetime.date.fromisoformat(calendar.SolarIsoFormat())
+
+
+def _build_kr_public_holidays(year: int) -> List[str]:
+    if year < 1000 or year > 2050:
+        raise ValueError("holiday calculation is supported for years 1000 through 2050")
+
+    holiday_categories: Dict[datetime.date, set[str]] = {}
+
+    def add_holiday(day: datetime.date, category: str) -> None:
+        holiday_categories.setdefault(day, set()).add(category)
+
+    fixed_holidays = [
+        (datetime.date(year, 1, 1), "newyear"),
+        (datetime.date(year, 3, 1), "national"),
+        (datetime.date(year, 5, 5), "children"),
+        (datetime.date(year, 6, 6), "memorial"),
+        (datetime.date(year, 8, 15), "national"),
+        (datetime.date(year, 10, 3), "national"),
+        (datetime.date(year, 10, 9), "national"),
+        (datetime.date(year, 12, 25), "christmas"),
+    ]
+    for day, category in fixed_holidays:
+        add_holiday(day, category)
+
+    for lunar_month, lunar_day, category in [
+        (1, 1, "seollal"),
+        (4, 8, "buddha"),
+        (8, 15, "chuseok"),
+    ]:
+        solar_day = _solar_from_lunar(year, lunar_month, lunar_day)
+        if category in {"seollal", "chuseok"}:
+            add_holiday(solar_day - datetime.timedelta(days=1), category)
+            add_holiday(solar_day, category)
+            add_holiday(solar_day + datetime.timedelta(days=1), category)
+        else:
+            add_holiday(solar_day, category)
+
+    substitute_eligible = {"national", "seollal", "buddha", "children", "chuseok", "christmas"}
+    saturday_sunday_eligible = {"national", "buddha", "children", "christmas"}
+    sunday_only_eligible = {"seollal", "chuseok"}
+
+    substitutes: set[datetime.date] = set()
+    occupied = set(holiday_categories.keys())
+    for day in sorted(holiday_categories.keys()):
+        categories = holiday_categories[day]
+        if not categories & substitute_eligible:
+            continue
+
+        weekday = day.weekday()
+        is_weekend_substitute = (
+            (weekday in {5, 6} and bool(categories & saturday_sunday_eligible))
+            or (weekday == 6 and bool(categories & sunday_only_eligible))
+        )
+        is_overlap_substitute = weekday not in {5, 6} and len(categories) >= 2 and bool(categories & substitute_eligible)
+        if not is_weekend_substitute and not is_overlap_substitute:
+            continue
+
+        candidate = day + datetime.timedelta(days=1)
+        while candidate.weekday() in {5, 6} or candidate in occupied or candidate in substitutes:
+            candidate += datetime.timedelta(days=1)
+        substitutes.add(candidate)
+
+    holidays = occupied | substitutes
+    return sorted(day.isoformat() for day in holidays)
 
 def _get_config() -> Dict[str, str]:
     """
@@ -24,11 +176,11 @@ def _get_config() -> Dict[str, str]:
     """
     client_id = os.getenv(
         "FT_CLIENT_ID",
-        "42_API_CLIENT_ID_HERE",
+        "u-s4t2ud-b4d2744071e3f1d772727401d4e0bf18292fd0a04bb0848c60ea559ae6bea8ad",
     )
     client_secret = os.getenv(
         "FT_CLIENT_SECRET",
-        "42_API_CLIENT_SECRET_HERE",
+        "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"
     )
 
     # Base URL where this FastAPI server is reachable from the browser.
@@ -143,11 +295,28 @@ def _parse_iso_dt(value: str) -> datetime.datetime:
     return datetime.datetime.fromisoformat(v)
 
 
-def _month_range_local(now_local: datetime.datetime) -> Tuple[datetime.datetime, datetime.datetime]:
-    tz = now_local.tzinfo
-    start = datetime.datetime(now_local.year, now_local.month, 1, tzinfo=tz)
-    # end is "now" (not month end), so we don't show future days.
-    return start, now_local
+def _month_start_local(year: int, month: int, tz: ZoneInfo) -> datetime.datetime:
+    return datetime.datetime(year, month, 1, tzinfo=tz)
+
+
+def _next_month_start_local(year: int, month: int, tz: ZoneInfo) -> datetime.datetime:
+    if month == 12:
+        return datetime.datetime(year + 1, 1, 1, tzinfo=tz)
+    return datetime.datetime(year, month + 1, 1, tzinfo=tz)
+
+
+def _resolve_target_year_month(
+    now_local: datetime.datetime,
+    year: Optional[int],
+    month: Optional[int],
+) -> Tuple[int, int]:
+    target_year = int(year) if year is not None else now_local.year
+    target_month = int(month) if month is not None else now_local.month
+    if target_month < 1 or target_month > 12:
+        raise ValueError("month must be between 1 and 12")
+    if target_year < 1000 or target_year > 2050:
+        raise ValueError("year must be between 1000 and 2050")
+    return target_year, target_month
 
 
 def _add_duration_per_day(
@@ -219,9 +388,25 @@ def _fetch_locations_in_range(
     return all_locations
 
 
-def _build_month_payload_from_locations(locations: List[Dict[str, Any]], now_local: datetime.datetime, location: str, state: Dict[str,Any], username: str) -> Dict[str, Any]:
+def _build_month_payload_from_locations(
+    locations: List[Dict[str, Any]],
+    now_local: datetime.datetime,
+    target_year: int,
+    target_month: int,
+    location: str,
+    state: Dict[str,Any],
+    username: str,
+) -> Dict[str, Any]:
     tz = ZoneInfo("Asia/Seoul")
-    month_start_local, month_end_local = _month_range_local(now_local)
+    month_start_local = _month_start_local(target_year, target_month, tz)
+    next_month_start_local = _next_month_start_local(target_year, target_month, tz)
+    holiday_dates = [
+        day
+        for day in _build_kr_public_holidays(target_year)
+        if day.startswith(f"{target_year}-{target_month:02d}-")
+    ]
+    is_current_month = target_year == now_local.year and target_month == now_local.month
+    month_end_local = now_local if is_current_month else next_month_start_local
 
     per_day_seconds: Dict[str, int] = {}
     for loc in locations:
@@ -245,11 +430,11 @@ def _build_month_payload_from_locations(locations: List[Dict[str, Any]], now_loc
 
         _add_duration_per_day(per_day_seconds, start_utc, end_utc, tz)
 
-    # Build day list from month start to today (local).
+    # Build day list to today for current month, otherwise full selected month.
     days: List[Dict[str, str]] = []
     total_seconds = 0
     cursor = month_start_local.date()
-    end_date = now_local.date()
+    end_date = now_local.date() if is_current_month else (next_month_start_local - datetime.timedelta(days=1)).date()
     while cursor <= end_date:
         key = cursor.isoformat()
         sec = per_day_seconds.get(key, 0)
@@ -259,8 +444,9 @@ def _build_month_payload_from_locations(locations: List[Dict[str, Any]], now_loc
 
     percent = round((total_seconds / (MAX_HOUR * 3600)) * 100, 2) if MAX_HOUR > 0 else 0.0
     return {
-        "year": now_local.year,
-        "month": now_local.month,
+        "year": target_year,
+        "month": target_month,
+        "holidays": holiday_dates,
         "alltime_hms": _to_hms(total_seconds),
         "percent": percent,
         "max_hour": MAX_HOUR,
@@ -340,11 +526,18 @@ def get_time(req: Request):
     if _ensure_user(req) is None:
         return RedirectResponse(_authorize_url())
 
-    with open("html.html", "r", encoding="utf-8") as f:
+    with open("search.html", "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
+"""@app.get("/time/search")
+def search_time(req: Request):
+    if _ensure_user(req) is None:
+        return RedirectResponse(_authorize_url())
 
+    with open("search.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+"""
 @app.get("/api/time")
-def api_time(req: Request):
+def api_time(req: Request, year: Optional[int] = Query(None), month: Optional[int] = Query(None)):
     """
     Returns month logtime data as JSON for the React UI.
     - Requires a valid 'access_token' cookie (set by /callback)
@@ -364,15 +557,20 @@ def api_time(req: Request):
         api_token = get_api_token()
 
     now_local = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
-    begin_local = datetime.datetime(
-        now_local.year, now_local.month, now_local.day, tzinfo=ZoneInfo("Asia/Seoul")
-    )
-    begin_utc = _iso_utc(begin_local)
-    end_utc = _iso_utc(now_local)
-    month_start_local, _ = _month_range_local(now_local)
+    try:
+        target_year, target_month = _resolve_target_year_month(now_local, year, month)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    month_start_local = _month_start_local(target_year, target_month, ZoneInfo("Asia/Seoul"))
+    next_month_start_local = _next_month_start_local(target_year, target_month, ZoneInfo("Asia/Seoul"))
+    fetch_end_local = min(now_local, next_month_start_local)
     month_begin_utc = _iso_utc(month_start_local)
+    end_utc = _iso_utc(fetch_end_local)
 
     def _do_fetch() -> List[Dict[str, Any]]:
+        if fetch_end_local <= month_start_local:
+            return []
         return _fetch_locations_in_range(userid, api_token, month_begin_utc, end_utc)
 
     try:
@@ -403,9 +601,14 @@ def api_time(req: Request):
             content={"error": "failed to build month payload", "detail": str(e)},
         )
 
-    return JSONResponse(content=_build_month_payload_from_locations(locations, now_local, location, state, username))
+    return JSONResponse(content=_build_month_payload_from_locations(locations, now_local, target_year, target_month, location, state, username))
 @app.get("/api/time/search")
-def api_time_search(req: Request, username: Optional[str] = Query(None, alias="username")):
+def api_time_search(
+    req: Request,
+    username: Optional[str] = Query(None, alias="username"),
+    year: Optional[int] = Query(None),
+    month: Optional[int] = Query(None),
+):
     """
     유저명(login)으로 해당 유저의 이번 달 학습 시간을 조회합니다.
     GET /api/time/search?username=로그인아이디
@@ -474,11 +677,20 @@ def api_time_search(req: Request, username: Optional[str] = Query(None, alias="u
         api_token = get_api_token()
 
     now_local = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
-    month_start_local, _ = _month_range_local(now_local)
+    try:
+        target_year, target_month = _resolve_target_year_month(now_local, year, month)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    month_start_local = _month_start_local(target_year, target_month, ZoneInfo("Asia/Seoul"))
+    next_month_start_local = _next_month_start_local(target_year, target_month, ZoneInfo("Asia/Seoul"))
+    fetch_end_local = min(now_local, next_month_start_local)
     month_begin_utc = _iso_utc(month_start_local)
-    end_utc = _iso_utc(now_local)
+    end_utc = _iso_utc(fetch_end_local)
 
     def _do_fetch() -> List[Dict[str, Any]]:
+        if fetch_end_local <= month_start_local:
+            return []
         return _fetch_locations_in_range(userid, api_token, month_begin_utc, end_utc)
 
     try:
@@ -506,9 +718,72 @@ def api_time_search(req: Request, username: Optional[str] = Query(None, alias="u
         )
 
     payload = _build_month_payload_from_locations(
-        locations, now_local, location, state, target["login"]
+        locations, now_local, target_year, target_month, location, state, target["login"]
     )
     return JSONResponse(content=payload)
+
+
+@app.get("/api/plan")
+def api_plan(req: Request, year: Optional[int] = Query(None), month: Optional[int] = Query(None)):
+    me = _ensure_user(req)
+    if me is None:
+        return JSONResponse(status_code=401, content={"authorize_url": _authorize_url()})
+
+    now_local = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    try:
+        target_year, target_month = _resolve_target_year_month(now_local, year, month)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    plan = _load_month_plan(me["login"], target_year, target_month)
+    return JSONResponse(content={
+        "username": me["login"],
+        "year": target_year,
+        "month": target_month,
+        "plan": plan,
+    })
+
+
+@app.put("/api/plan")
+def api_plan_put(
+    req: Request,
+    payload: Dict[str, Any] = Body(...),
+):
+    me = _ensure_user(req)
+    if me is None:
+        return JSONResponse(status_code=401, content={"authorize_url": _authorize_url()})
+
+    now_local = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    try:
+        target_year, target_month = _resolve_target_year_month(
+            now_local,
+            int(payload.get("year")) if payload.get("year") is not None else None,
+            int(payload.get("month")) if payload.get("month") is not None else None,
+        )
+    except (TypeError, ValueError) as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    try:
+        day = int(payload.get("day"))
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400, content={"error": "day is required"})
+
+    if day < 1 or day > 31:
+        return JSONResponse(status_code=400, content={"error": "day must be between 1 and 31"})
+
+    goal_hms_raw = payload.get("goal_hms")
+    if goal_hms_raw is not None and not isinstance(goal_hms_raw, str):
+        return JSONResponse(status_code=400, content={"error": "goal_hms must be a string"})
+    goal_hms = str(goal_hms_raw or "").strip()
+
+    plan = _save_plan_value(me["login"], target_year, target_month, day, goal_hms)
+    return JSONResponse(content={
+        "ok": True,
+        "username": me["login"],
+        "year": target_year,
+        "month": target_month,
+        "plan": plan,
+    })
 
 @app.post("/api/state")
 def set_user_state(
